@@ -1,2 +1,2 @@
-# CC_GCN-CL_exp
-Improved model(Continual_Learning_CC_KDBC) with GCN+LSTM
+# KDD_GconLSTM_exp
+Improved model(GconvLSTM) exp
