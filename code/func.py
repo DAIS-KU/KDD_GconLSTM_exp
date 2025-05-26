@@ -15,206 +15,6 @@ import networkx as nx
 import time
 from collections import defaultdict
 
-# func.py 상단에 추가할 import 및 시간 측정 함수
-import logging
-import sys
-from datetime import datetime
-
-def setup_timing_logger(log_file_prefix="timing"):
-    """시간 측정용 로거 설정"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = f"../logs/{log_file_prefix}_{timestamp}.log"
-    
-    # 로거 생성
-    timing_logger = logging.getLogger('timing_logger')
-    timing_logger.setLevel(logging.INFO)
-    
-    # 기존 핸들러 제거 (중복 방지)
-    timing_logger.handlers.clear()
-    
-    # 파일 핸들러 추가
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_formatter = logging.Formatter('%(asctime)s - %(message)s')
-    file_handler.setFormatter(file_formatter)
-    timing_logger.addHandler(file_handler)
-    
-    # 콘솔 핸들러 추가 (nohup에서도 출력 확인 가능)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_formatter = logging.Formatter('%(message)s')
-    console_handler.setFormatter(console_formatter)
-    timing_logger.addHandler(console_handler)
-    
-    timing_logger.info(f"=== 시간 측정 시작: {datetime.now()} ===")
-    timing_logger.info(f"로그 파일: {log_file}")
-    
-    return timing_logger
-
-def log_timing(logger, iteration, step, elapsed_time, additional_info=""):
-    """시간 측정 결과 로깅"""
-    message = f"Iter {iteration:2d} | {step:20s} | {elapsed_time:8.4f}s"
-    if additional_info:
-        message += f" | {additional_info}"
-    logger.info(message)
-    logger.handlers[1].flush()  # 콘솔 출력 즉시 플러시
-    logger.handlers[0].flush()  # 파일 출력 즉시 플러시
-
-
-from collections import deque
-
-# update_coreness 관련 함수들 추가
-def mcdegree_node(G, u, K):
-    k = K[u]
-    return sum(1 for nb in G.neighbors(u) if K[nb] >= k)
-
-def mcdegree_dict(G, nodes, K=None):
-    mcd = {}
-    for u in nodes:
-        mcd[u] = mcdegree_node(G, u, K)
-    return mcd
-
-def propagate_dismissal(G, K, MCD, cd, dismissed, visited, k, v):
-    dismissed[v] = True
-    K[v] -= 1
-    for w in G.neighbors(v):
-        if K[w] == k:
-            if not visited[w]:
-                if w not in MCD:
-                    MCD[w] = mcdegree_node(G, w, K)
-                    MCD[w] += 1
-                cd[w] += MCD[w]
-                visited[w] = True
-            cd[w] -= 1
-            if not dismissed[w] and cd[w] < k:
-                propagate_dismissal(G, K, MCD, cd, dismissed, visited, k, w)
-
-def prepareRCDs(G, K, MCD, u, v):
-    node_set = set()
-    for node in (u, v):
-        if node in G:
-            node_set.add(node)
-            node_set.update(G.neighbors(node))
-    
-    for node in node_set:
-        MCD[node] = mcdegree_node(G, node, K)
-
-def recomputeRCD(G, K, MCD, dismissed):
-    node_set = set()
-    for node in dismissed:
-        if dismissed[node]:
-            if node not in node_set:
-                MCD[node] = mcdegree_node(G, node, K)
-                node_set.add(node)
-            
-            for nb in G.neighbors(node):
-                if nb not in node_set:
-                    MCD[nb] = mcdegree_node(G, nb, K)
-                    node_set.add(nb)
-
-def traversal(G, K, MCD, u, v):
-    r = u
-    if K[v] < K[u]: 
-        r = v
-    
-    prepareRCDs(G, K, MCD, u, v)
-    
-    visited = defaultdict(lambda: False)
-    dismissed = defaultdict(lambda: False)
-    cd = defaultdict(lambda: 0)
-    k = K[r]
-    
-    if K[u] != K[v]:
-        if r in G.nodes():
-            visited[r] = True
-            if r not in MCD: 
-                MCD[r] = mcdegree_node(G, r, K)
-            cd[r] = MCD[r]
-            if cd[r] < k:
-                propagate_dismissal(G, K, MCD, cd, dismissed, visited, k, r)
-    else:
-        if u in G.nodes():
-            visited[u] = True
-            if u not in MCD: 
-                MCD[u] = mcdegree_node(G, u, K)
-            cd[u] = MCD[u]
-            if cd[u] < k:
-                propagate_dismissal(G, K, MCD, cd, dismissed, visited, k, u)
-        if v in G.nodes():
-            visited[v] = True
-            if v not in MCD: 
-                MCD[v] = mcdegree_node(G, v, K)
-            cd[v] = MCD[v]
-            if not dismissed[v] and cd[v] < k:
-                propagate_dismissal(G, K, MCD, cd, dismissed, visited, k, v)
-    recomputeRCD(G, K, MCD, dismissed)
-
-def run_update_coreness(G, K_, MCD_, node, f='F'):
-    K = K_.copy()
-    MCD = MCD_.copy()
-    edge_list = set(G.edges(node))
-    for u, v in edge_list:
-        G.remove_edge(u, v)
-        traversal(G, K, MCD, u, v)
-    del K[node]
-    if f == 'T':
-        G.add_edges_from(edge_list)
-    else:
-        G.remove_node(node)
-    return K, MCD
-
-class CorenessManager:
-    def __init__(self, G):
-        self.original_G = G.copy()  # 원본 그래프 보존
-        self.G = G.copy()  # 작업용 그래프
-        self.coreness = nx.core_number(G)  # 초기 계산은 nx 사용
-        self.MCD = mcdegree_dict(G, G.nodes(), self.coreness)
-        self.removed_nodes = set()
-    
-    def get_coreness(self, node=None):
-        """현재 coreness 값 반환"""
-        if node is None:
-            return self.coreness.copy()
-        return self.coreness.get(node, 0)
-    
-    def remove_node_edges_only(self, node):
-        """노드의 엣지만 제거하고 coreness 업데이트 (노드는 유지)"""
-        if node in self.removed_nodes or node not in self.original_G.nodes():
-            return
-        
-        self.removed_nodes.add(node)
-        
-        # 엣지만 제거 (기존 방식과 동일)
-        edges_to_remove = list(self.G.edges(node))
-        for u, v in edges_to_remove:
-            if self.G.has_edge(u, v):
-                self.G.remove_edge(u, v)
-                traversal(self.G, self.coreness, self.MCD, u, v)
-        
-        # coreness에서 해당 노드 값을 0으로 설정 (삭제되었음을 표시)
-        if node in self.coreness:
-            self.coreness[node] = 0
-    
-    def get_coreness_after_removal(self, node):
-        """노드 제거 시뮬레이션 (실제로 제거하지 않음)"""
-        if node not in self.G.nodes() or node in self.removed_nodes:
-            return self.coreness.copy()
-        
-        # 임시 그래프로 시뮬레이션
-        temp_G = self.G.copy()
-        temp_coreness = self.coreness.copy()
-        temp_MCD = self.MCD.copy()
-        
-        # 엣지만 제거하여 시뮬레이션
-        edges_to_remove = list(temp_G.edges(node))
-        for u, v in edges_to_remove:
-            if temp_G.has_edge(u, v):
-                temp_G.remove_edge(u, v)
-                traversal(temp_G, temp_coreness, temp_MCD, u, v)
-        
-        # 해당 노드의 coreness를 0으로 설정
-        temp_coreness[node] = 0
-        
-        return temp_coreness
-
 
 def load_graph(filename):
     """karate.dat 파일을 로드하여 NetworkX 그래프로 변환"""
@@ -229,34 +29,28 @@ def load_graph(filename):
 
     return G
 
-# 수정된 get_node_features 함수
-def get_node_features(G, coreness_manager=None):
+# 그래프 feature 추출
+def get_node_features(G):
     """노드 특징 생성: Degree, PageRank, Clustering Coefficient, Coreness"""
     features = {}
     pagerank = nx.pagerank(G)
     clustering = nx.clustering(G)
-    
-    # coreness_manager가 있으면 사용, 없으면 기존 방식
-    if coreness_manager is not None:
-        coreness = coreness_manager.get_coreness()
-    else:
-        coreness = nx.core_number(G)
+    coreness = nx.core_number(G)
 
     for node in G.nodes():
         features[node] = [
             G.degree(node),           # Degree
             pagerank[node],           # PageRank
             clustering[node],         # Clustering Coefficient
-            coreness.get(node, 0)     # Coreness
+            coreness[node]            # Coreness
         ]
 
     return features
 
 # 그래프에 input, target 설정
-# 수정된 prepare_graph_data 함수
-def prepare_graph_data(graph, follower_counts, coreness_manager=None):
+def prepare_graph_data(graph, follower_counts):
     """NetworkX 그래프를 PyTorch Geometric 형식으로 변환, Target: Follower Count"""
-    node_features = get_node_features(graph, coreness_manager)
+    node_features = get_node_features(graph)
     data = from_networkx(graph)
 
     # 노드 특징을 PyTorch Tensor로 변환
@@ -269,30 +63,24 @@ def prepare_graph_data(graph, follower_counts, coreness_manager=None):
 
     return data
 
-# 수정된 get_follower_counts 함수
-def get_follower_counts(G, nodes, follower_counts, follower_list, coreness_manager=None):
-    """각 노드가 제거될 때 영향을 받는 follower 수 계산"""
-    
-    if coreness_manager is not None:
-        current_coreness = coreness_manager.get_coreness()
-    else:
-        current_coreness = nx.core_number(G)
+# Follower 수 계산
+def get_follower_counts(G, nodes, follower_counts, follower_list):
+    """각 노드가 제거될 때 영향을 받는 follower 수 계산
+
+        returns : dict(node: follower count), dict(node: list of followers of node)
+
+    """
+    coreness = nx.core_number(G)
 
     for node in nodes:
         node_follower = []
-        
-        # update_coreness를 사용한 시뮬레이션
-        if coreness_manager is not None:
-            new_coreness = coreness_manager.get_coreness_after_removal(node)
-        else:
-            # 기존 방식 (fallback)
-            G_copy = G.copy()
-            G_copy.remove_node(node)
-            new_coreness = nx.core_number(G_copy)
+        G_copy = G.copy()
+        G_copy.remove_node(node)
+        new_coreness = nx.core_number(G_copy)
 
         # Follower 수는 Coreness 값이 변한 노드들의 개수
-        followers = sum(1 for n in G.nodes() if current_coreness.get(n, 0) != new_coreness.get(n, 0))
-        node_follower.extend(n for n in G.nodes() if current_coreness.get(n, 0) != new_coreness.get(n, 0))
+        followers = sum(1 for n in G.nodes() if coreness[n] != new_coreness.get(n, coreness[n]))
+        node_follower.extend(n for n in G.nodes() if coreness[n] != new_coreness.get(n, coreness[n]))
         follower_list[node] = node_follower
         follower_counts[node] = followers
 
@@ -702,35 +490,41 @@ def train_model(model_type, model, optimizer, data, ewc, lambda_ewc, criterion, 
         # if epoch % 10 == 0:
         #     print(f"Epoch {epoch}: Loss = {loss.item():.4f}")
 
-# 수정된 GConvLSTM + Partial
+# GConvLSTM + Partial
 def GConvLSTM_partial(device, graph, budget, model_type, model, criterion, initial_sample_rate, sample_rate, hop=2, lambda_ewc=400,
-                     initial_epochs=200, continual_epochs=100, learning_rate=0.01, use_ewc=True, enable_timing=True):
+                     initial_epochs=200, continual_epochs=100, learning_rate=0.01, use_ewc=True):
     """
-    노드 샘플링을 이용한 연속 학습 함수 (시간 측정 추가)
+    노드 샘플링을 이용한 연속 학습 함수
+
+    Args:
+        graph (nx.Graph): 학습에 사용할 그래프
+        budget (int): 제거할 노드 수
+        model (GLSTM, optional): 사전 학습된 모델 (없으면 새로 생성)
+        lambda_ewc (float): EWC 가중치
+        use_ewc (bool): EWC 사용 여부
+        initial_epochs (int): 초기 학습 epoch 수
+        continual_epochs (int): 연속 학습 epoch 수
+        learning_rate (float): 학습률
+        verbose (bool): 상세 출력 여부
+
+    Returns:
+        tuple: (total_removed, model, execution_time)
+        - total removed (list): 누적 제거된 follower count
+        - model (GLSTM): 학습된 모델
+        - execution_time (float): 실행 시간
     """
-    # 시간 측정 로거 설정
-    timing_logger = setup_timing_logger("GConvLSTM_partial") if enable_timing else None
-    
     start_time = time.time()
     G = graph.copy()
     original_node_count = G.number_of_nodes()
-    
-    # CorenessManager 초기화
-    init_start = time.time()
-    original_coreness_manager = CorenessManager(graph.copy())
-    current_coreness_manager = CorenessManager(G)
-    original_coreness = original_coreness_manager.get_coreness()
-    init_time = time.time() - init_start
-    
-    if timing_logger:
-        log_timing(timing_logger, 0, "CorenessManager 초기화", init_time)
+    original_coreness = nx.core_number(graph)
+
 
     # 모델 설정
-    model_init_start = time.time()
     if model is None:
-        input_dim = 4
+        # 모델 파라미터 설정
+        input_dim = 4 # Degree, PageRank, Clustering Coefficient, Coreness
         hidden_dim = 64
-        k = 3
+        k = 3 # Chebyshev convolution
         fc_hidden_dim = 128
         output_dim = 1
 
@@ -743,102 +537,55 @@ def GConvLSTM_partial(device, graph, budget, model_type, model, criterion, initi
         ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    model_init_time = time.time() - model_init_start
-    
-    if timing_logger:
-        log_timing(timing_logger, 0, "모델 초기화", model_init_time)
 
     # 결과 저장 변수
-    total_removed = [0]
-    train_sequence = []
-    test_sequence = []
+    total_removed = [0] # 누적 제거된 follower count
+    train_sequence = []  # 학습에 사용할 data sequence
+    test_sequence = []  # 테스트에 사용할 data sequence
     removed_nodes = set()
     follower_computations = []
     follower_counts = defaultdict(int)
     follower_lists = defaultdict(int)
 
     # 초기 follower 계산
-    follower_start = time.time()
     actual_followers = node_sampling(G.nodes(), initial_sample_rate)
-    follower_counts, follower_lists, follower_compute = get_follower_counts(
-        G, actual_followers, follower_counts, follower_lists, current_coreness_manager)
+    follower_counts, follower_lists, follower_compute = get_follower_counts(G, actual_followers, follower_counts, follower_lists)
     follower_computations.append(follower_compute)
-    follower_time = time.time() - follower_start
-    
-    if timing_logger:
-        log_timing(timing_logger, 0, "초기 Follower 계산", follower_time, f"nodes: {len(actual_followers)}")
 
     # 초기 데이터 준비
-    data_prep_start = time.time()
-    test_data = prepare_graph_data(G, follower_counts, current_coreness_manager)
+    test_data = prepare_graph_data(G, follower_counts)
     test_data = test_data.to(device)
     train_sequence.append(test_data)
     test_sequence.append(test_data)
-    data_prep_time = time.time() - data_prep_start
-    
-    if timing_logger:
-        log_timing(timing_logger, 0, "초기 데이터 준비", data_prep_time)
 
     # 반복적으로 노드 제거 및 재학습
     for iteration in range(budget):
-        iter_start = time.time()
-        
-        if timing_logger:
-            timing_logger.info(f"\n--- Iteration {iteration + 1}/{budget} 시작 ---")
-        
-        # 원본 그래프 coreness 계산 (제거된 노드들 반영)
         original_graph = graph.copy()
 
         if not G.nodes:
             break
 
         if iteration == 0:
-            # 전체 그래프에 대한 초기 학습
-            train_start = time.time()
-            train_model(model_type, model, optimizer, train_sequence, None, lambda_ewc, criterion, epochs=initial_epochs)
-            train_time = time.time() - train_start
-            
-            if timing_logger:
-                log_timing(timing_logger, iteration + 1, "초기 학습", train_time, f"epochs: {initial_epochs}")
-            
-            ewc_start = time.time()
-            if use_ewc:
-                ewc = EWC(device, model_type, model, train_sequence, lambda_ewc, criterion)
-            else:
-                ewc = None
-            ewc_time = time.time() - ewc_start
-            
-            if timing_logger:
-                log_timing(timing_logger, iteration + 1, "EWC 초기화", ewc_time)
+          # 전체 그래프에 대한 초기 학습
+          train_model(model_type, model, optimizer, train_sequence, None, lambda_ewc, criterion, epochs=initial_epochs)
+          if use_ewc:
+            ewc = EWC(device, model_type, model, train_sequence, lambda_ewc, criterion)
+          else:
+              ewc = None
         else:
-            # 이후 학습
-            train_start = time.time()
-            train_model(model_type, model, optimizer, train_sequence, ewc, lambda_ewc, criterion, epochs=continual_epochs)
-            train_time = time.time() - train_start
-            
-            if timing_logger:
-                log_timing(timing_logger, iteration + 1, "연속 학습", train_time, f"epochs: {continual_epochs}")
-            
-            ewc_update_start = time.time()
-            if use_ewc:
-                ewc.update_fisher_information(ewc.calculate_fisher_information())
-            ewc_update_time = time.time() - ewc_update_start
-            
-            if timing_logger:
-                log_timing(timing_logger, iteration + 1, "EWC 업데이트", ewc_update_time)
+          # 이후 학습
+          train_model(model_type, model, optimizer, train_sequence, ewc, lambda_ewc, criterion, epochs=continual_epochs)
+          if use_ewc:
+            ewc.update_fisher_information(ewc.calculate_fisher_information())
+          else:
+              pass
 
         # Follower 예측
-        pred_start = time.time()
         with torch.no_grad():
-            predicted_followers, _ = model(test_sequence)
-            predicted_followers = predicted_followers.cpu().numpy().flatten()
-        pred_time = time.time() - pred_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "Follower 예측", pred_time)
+          predicted_followers, _ = model(test_sequence)
+          predicted_followers = predicted_followers.cpu().numpy().flatten()
 
-        # 노드별 예측 follower 매핑
-        node_select_start = time.time()
+        # 노드별 에측 follower 매핑
         node_follower_map = {node: predicted_followers[node] for node in G.nodes()}
 
         # 예측 follower가 가장 많은 노드
@@ -847,60 +594,36 @@ def GConvLSTM_partial(device, graph, budget, model_type, model, criterion, initi
             key=node_follower_map.get
         )
         removed_nodes.add(target_node)
-        node_select_time = time.time() - node_select_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "노드 선택", node_select_time, f"selected: {target_node}")
 
-        # Coreness loss 계산
-        loss_calc_start = time.time()
+        # 원래 그래프에서 제거된 노드들 한 번에 제거
         original_graph.remove_nodes_from(removed_nodes)
+
+        # 제거 후 coreness sum
         after_coreness = nx.core_number(original_graph)
-        now_coreness = current_coreness_manager.get_coreness()
+        now_coreness = nx.core_number(G)
 
-        coreness_loss = sum(original_coreness[v] - after_coreness.get(v, 0) for v in after_coreness)
-        actual_followers = [v for v in after_coreness if now_coreness.get(v, 0) != after_coreness.get(v, 0)]
+        # Coreness loss 측정
+        coreness_loss = sum(original_coreness[v] - after_coreness[v] for v in after_coreness)
+        actual_followers = [v for v in after_coreness if now_coreness[v] != after_coreness[v]]
         actual_followers = node_sampling(actual_followers, sample_rate)
-        loss_calc_time = time.time() - loss_calc_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "Coreness Loss 계산", loss_calc_time, f"loss: {coreness_loss}")
 
-        # Subgraph 생성
-        subgraph_start = time.time()
+        # follower + neighbor의 subgraph
         sampled_nodes, train_graph = create_follower_subgraph(
             G, actual_followers, target_node, original_node_count, hop
         )
-        subgraph_time = time.time() - subgraph_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "Subgraph 생성", subgraph_time, f"nodes: {len(sampled_nodes)}")
 
         # 선택된 노드 제거
-        node_removal_start = time.time()
         G.remove_edges_from(list(G.edges(target_node)))
-        current_coreness_manager.remove_node_edges_only(target_node)
-        node_removal_time = time.time() - node_removal_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "노드 제거", node_removal_time)
 
         # Coreness loss 누적
         total_removed.append(coreness_loss)
 
-        # 노드 제거한 후 follower 정보 업데이트
-        follower_update_start = time.time()
-        follower_counts, follower_lists, follower_compute = get_follower_counts(
-            G, actual_followers, follower_counts, follower_lists, current_coreness_manager)
+        # 노드 제거한 후 각 노드의 follower 정보
+        follower_counts, follower_lists , follower_compute = get_follower_counts(G, actual_followers, follower_counts, follower_lists)
         follower_computations.append(follower_compute)
-        follower_update_time = time.time() - follower_update_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "Follower 업데이트", follower_update_time, f"computed: {follower_compute}")
 
-        # 데이터 준비
-        data_update_start = time.time()
-        train_data = prepare_graph_data(train_graph, follower_counts, current_coreness_manager)
+        # train data 생성
+        train_data = prepare_graph_data(train_graph, follower_counts)
         train_data = train_data.to(device)
 
         # 이전 그래프 정보 가져오기
@@ -914,7 +637,7 @@ def GConvLSTM_partial(device, graph, budget, model_type, model, criterion, initi
         train_sequence.append(train_data)
 
         # test sequence 추가
-        test_data = prepare_graph_data(G, follower_counts, current_coreness_manager)
+        test_data = prepare_graph_data(G, follower_counts)
         test_data = test_data.to(device)
         test_sequence.append(test_data)
 
@@ -923,24 +646,9 @@ def GConvLSTM_partial(device, graph, budget, model_type, model, criterion, initi
 
         # 이전 그래프의 그래프 업데이트
         if iteration >= 1:
-            train_sequence[iteration] = test_sequence[iteration]
-        
-        data_update_time = time.time() - data_update_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "데이터 업데이트", data_update_time)
-
-        iter_total_time = time.time() - iter_start
-        
-        if timing_logger:
-            log_timing(timing_logger, iteration + 1, "Iteration 총 시간", iter_total_time)
-            timing_logger.info(f"--- Iteration {iteration + 1} 완료 ---\n")
+          train_sequence[iteration] = test_sequence[iteration]
 
     execution_time = time.time() - start_time
-    
-    if timing_logger:
-        timing_logger.info(f"=== 전체 실행 완료: {datetime.now()} ===")
-        timing_logger.info(f"총 실행 시간: {execution_time:.4f}s")
 
     return total_removed, removed_nodes, execution_time, follower_computations
 
