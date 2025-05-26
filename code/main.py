@@ -20,6 +20,8 @@ def main():
     parser.add_argument('--use_ewc', default=True, type=bool)
     parser.add_argument('--initial_sample_rate', default=0.1, type=float)
     parser.add_argument('--sample_rate', default=0.1, type=float)
+    parser.add_argument('--enable_timing', default=True, type=bool, help='Enable detailed timing logs')
+
     # parser.add_argument('--continual_sample_rate', default=0.5, type=float)
 
 
@@ -41,13 +43,13 @@ def main():
     coreness_loss_list = []
     follower_computation_list = []
 
-    for iteration in range(10):
+    for iteration in range(1):
         # print(iteration)
         if args.method == 'GConvLSTM_partial':
             # follower 기반 hop으로 subgraph 생성
             # print("GConvLSTM Partial")
             coreness_loss, removed_nodes, _, follower_computations = func.GConvLSTM_partial(device, test_graph.copy(), budget, "GConvLSTM",None, criterion,
-                                                                             initial_sample_rate, sample_rate, hop, lambda_ewc, initial_epochs, continual_epochs, learning_rate, use_ewc)
+                                                                             initial_sample_rate, sample_rate, hop, lambda_ewc, initial_epochs, continual_epochs, learning_rate, use_ewc, args.enable_timing)
         elif args.method == 'GConvLSTM_combine':
             # print("GConvLSTM Combined")
             coreness_loss, removed_nodes, _, follower_computations = func.GConvLSTM_combine(device, test_graph.copy(), budget, "GConvLSTM",None, criterion,
